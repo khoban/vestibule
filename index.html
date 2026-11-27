@@ -1,0 +1,504 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Star Circle</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #05060a; overflow: hidden; }
+  body { display: grid; place-items: center; }
+  canvas {
+    /* circle + its glow are drawn in the canvas now, so leave room around it */
+    width: min(129vmin, 1036px);
+    aspect-ratio: 1;
+  }
+</style>
+</head>
+<body>
+<canvas id="c" role="img" aria-label="A circle filled with twinkling stars"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let size, u, stars; // u = layout unit; canvas is 1.4u wide to leave room for the outer glow
+
+// Soft glow sprite, drawn once and stamped per star (much cheaper than shadowBlur per star)
+const glow = document.createElement('canvas');
+glow.width = glow.height = 64;
+{
+  const c = glow.getContext('2d');
+  const grad = c.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0, 'rgba(210,225,255,0.9)');
+  grad.addColorStop(0.25, 'rgba(130,165,255,0.35)');
+  grad.addColorStop(1, 'rgba(80,120,255,0)');
+  c.fillStyle = grad;
+  c.fillRect(0, 0, 64, 64);
+}
+
+// Lens-flare sprite for the big stars: soft tapered streaks + faint halo ring, drawn once
+const flare = document.createElement('canvas');
+flare.width = flare.height = 256;
+{
+  const c = flare.getContext('2d');
+  const streak = (sx, sy, rot, alpha) => { // a radial gradient squashed into a thin tapered ray
+    c.save();
+    c.translate(128, 128); c.rotate(rot); c.scale(sx, sy);
+    const g = c.createRadialGradient(0, 0, 0, 0, 0, 128);
+    g.addColorStop(0, `rgba(225,235,255,${alpha})`);
+    g.addColorStop(0.25, `rgba(150,180,255,${alpha * 0.35})`);
+    g.addColorStop(1, 'rgba(90,130,255,0)');
+    c.fillStyle = g;
+    c.beginPath(); c.arc(0, 0, 128, 0, Math.PI * 2); c.fill();
+    c.restore();
+  };
+  streak(1, 0.035, 0, 0.9);               // long horizontal streak
+  streak(0.55, 0.03, Math.PI / 2, 0.55);  // shorter vertical
+  streak(0.3, 0.02, Math.PI / 4, 0.25);   // faint diagonals
+  streak(0.3, 0.02, -Math.PI / 4, 0.25);
+  const ring = c.createRadialGradient(128, 128, 30, 128, 128, 52);
+  ring.addColorStop(0, 'rgba(140,175,255,0)');
+  ring.addColorStop(0.5, 'rgba(140,175,255,0.12)');
+  ring.addColorStop(1, 'rgba(140,175,255,0)');
+  c.fillStyle = ring;
+  c.fillRect(0, 0, 256, 256);
+}
+
+function resize() {
+  size = canvas.clientWidth * devicePixelRatio;
+  canvas.width = canvas.height = size;
+  u = size / 1.4;
+  const rand = (a, b) => a + Math.random() * (b - a);
+  stars = Array.from({ length: 220 }, () => ({
+    angle: rand(0, Math.PI * 2),
+    dist: Math.sqrt(Math.random()) * 0.43,   // sqrt = even spread over the disc; 0.43 = circle's max radius
+    lag: rand(0, 1.2),                       // offset into the shared in/out breath
+    spin: rand(-0.05, 0.05),                 // slow angular drift, rad/s
+    wf: [rand(0.3, 0.9), rand(0.3, 0.9), rand(0.9, 1.7), rand(0.9, 1.7)],
+    wp: [rand(0, 6.3), rand(0, 6.3), rand(0, 6.3), rand(0, 6.3)],
+    r: Math.random() ** 3 * 2.2 + 0.4,       // mostly small, a few big
+    phase: Math.random() * Math.PI * 2,
+    speed: 0.5 + Math.random() * 1.5,
+  }));
+}
+
+function draw(t) {
+  const s = t / 1000;
+  // Rim glow breathes on the same 8s cycle as the stars (stars lag slightly behind it)
+  const e = 0.5 + 0.5 * Math.cos(s * Math.PI / 4); // 1 = stars out, glow strongest
+  const R = u * 0.43;
+  const rp = rimRipple(s); // rim wave from a shooting-star impact, or null
+  const c0 = size / 2;
+  ctx.clearRect(0, 0, size, size);
+  ctx.save();
+  ctx.beginPath();
+  rimPath(c0, R, rp);
+  ctx.clip();
+  const g = ctx.createRadialGradient(c0, c0, 0, c0, c0, R);
+  g.addColorStop(0, '#1a2a5e');    // blue centre
+  g.addColorStop(0.55, '#1c1240'); // dark purple
+  g.addColorStop(1, '#05030c');
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, size, size);
+
+  // Slow drifting nebula clouds in blue and purple
+  for (const [col, ox, oy, fx, fy, rr] of [
+    ['60,95,230,0.22', 0.15, -0.1, 0.07, 0.05, 0.35],
+    ['100,45,170,0.28', -0.15, 0.12, 0.05, 0.08, 0.32],
+    ['45,25,110,0.35', 0.05, 0.18, 0.09, 0.04, 0.28],
+  ]) {
+    const nx = c0 + u * (ox + 0.08 * Math.sin(s * fx));
+    const ny = c0 + u * (oy + 0.08 * Math.cos(s * fy));
+    const ng = ctx.createRadialGradient(nx, ny, 0, nx, ny, u * rr);
+    ng.addColorStop(0, `rgba(${col})`);
+    ng.addColorStop(1, `rgba(${col.replace(/[\d.]+$/, '0')})`);
+    ctx.fillStyle = ng;
+    ctx.fillRect(0, 0, size, size);
+  }
+
+  const pts = stars.map(st => {
+    // 8s breath: 1 = out at home position, 0.08 = pulled near centre
+    const breath = 0.08 + 0.92 * (0.5 + 0.5 * Math.cos(s * Math.PI / 4 - st.lag));
+    const r0 = st.dist * breath;
+    const ang = st.angle + s * st.spin;
+    // random wander: two layered sines per axis, smooth and unrepeating-looking
+    const w = st.wf, p = st.wp;
+    const jx = 0.012 * Math.sin(s * w[0] + p[0]) + 0.006 * Math.sin(s * w[2] + p[2]);
+    const jy = 0.012 * Math.sin(s * w[1] + p[1]) + 0.006 * Math.sin(s * w[3] + p[3]);
+    const x = c0 + (Math.cos(ang) * r0 + jx) * u;
+    const y = c0 + (Math.sin(ang) * r0 + jy) * u;
+    const a = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(s * st.speed * 2 + st.phase));
+    return { x, y, a, r: st.r * devicePixelRatio, big: st.r > 1.6, links: 0 };
+  });
+
+  // Lines between nearby stars, max 3 per star so the centre clump doesn't turn into a white blob.
+  // Grouped into 4 opacity bands so the glow (shadowBlur) runs 4 times per frame, not once per line.
+  const maxD = 0.1 * u, BANDS = 4;
+  const paths = Array.from({ length: BANDS }, () => new Path2D());
+  for (let i = 0; i < pts.length; i++) {
+    const p = pts[i];
+    for (let j = i + 1; j < pts.length && p.links < 3; j++) {
+      const q = pts[j];
+      if (q.links >= 3) continue;
+      const d = Math.hypot(p.x - q.x, p.y - q.y);
+      if (d >= maxD) continue;
+      const band = Math.min(BANDS - 1, (1 - d / maxD) * BANDS | 0); // closer = brighter
+      paths[band].moveTo(p.x, p.y);
+      paths[band].lineTo(q.x, q.y);
+      p.links++; q.links++;
+    }
+  }
+  ctx.lineWidth = devicePixelRatio;
+  ctx.strokeStyle = '#a8c0ff';
+  ctx.shadowColor = 'rgba(110,150,255,0.9)';
+  ctx.shadowBlur = 8 * devicePixelRatio;
+  paths.forEach((path, b) => { ctx.globalAlpha = 0.6 * (b + 1) / BANDS; ctx.stroke(path); });
+  ctx.shadowBlur = 0;
+
+  ctx.globalCompositeOperation = 'lighter'; // overlapping glows add up softly
+  for (const { x, y, a, r, big } of pts) {
+    ctx.globalAlpha = a;
+    const gr = r * (big ? 10 : 7);
+    ctx.drawImage(glow, x - gr, y - gr, gr * 2, gr * 2);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    if (big) { // lens flare; grows slightly as the star twinkles brighter
+      const fr = r * 16 * (0.8 + 0.4 * a);
+      ctx.drawImage(flare, x - fr, y - fr, fr * 2, fr * 2);
+    }
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = 1;
+  ctx.restore(); // drop the circle clip
+
+  // Glowing rim: glow swells and brightens with the breath; the rim line itself
+  // thickens and blurs into the glow at the peak, sharpening back to a thin line
+  const hw = (1.5 + 5 * e) * devicePixelRatio;  // half-width of the rim
+  const core = 0.4 * (1 - e);                   // solid part of the rim; 0 = all soft falloff
+  const rimColor = `rgba(180,200,255,${0.3 + 0.5 * e})`;
+  const rim = ctx.createRadialGradient(c0, c0, R - hw, c0, c0, R + hw);
+  rim.addColorStop(0, 'rgba(180,200,255,0)');
+  rim.addColorStop(0.5 - core, rimColor);
+  rim.addColorStop(0.5 + core, rimColor);
+  rim.addColorStop(1, 'rgba(180,200,255,0)');
+  ctx.lineWidth = hw * 2;
+  ctx.strokeStyle = rim;
+  // glow shifts from purple (low) to blue (peak)
+  ctx.shadowColor = `rgba(${130 - 40 * e},${70 + 70 * e},255,${0.4 + 0.5 * e})`;
+  ctx.shadowBlur = (8 + 40 * e) * devicePixelRatio;
+  // Clip to outside the circle so the rim and its glow only spread outwards
+  // (keeps a 1.5px sliver just inside so the edge stays crisp)
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, size, size);
+  rimPath(c0, R - 1.5 * devicePixelRatio, rp);
+  ctx.clip('evenodd');
+  // Wide soft halo beyond the rim; reaches further and brightens with the breath
+  const haloR = R + u * (0.12 + 0.12 * e);
+  const halo = ctx.createRadialGradient(c0, c0, R, c0, c0, haloR);
+  const hc = `${130 - 40 * e},${70 + 70 * e},255`;
+  halo.addColorStop(0, `rgba(${hc},${0.25 + 0.3 * e})`);
+  halo.addColorStop(0.4, `rgba(${hc},${0.08 + 0.1 * e})`);
+  halo.addColorStop(1, `rgba(${hc},0)`);
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = halo;
+  ctx.fillRect(0, 0, size, size);
+  ctx.shadowBlur = (8 + 40 * e) * devicePixelRatio;
+  ctx.beginPath();
+  rimPath(c0, R, rp);
+  if (rp) {
+    // The soft gradient rim only lines up with an undisturbed circle, so while the
+    // wave runs, cross-fade to a solid line that can follow the displacement
+    ctx.globalAlpha = 1 - rp.env;
+    ctx.stroke();
+    ctx.globalAlpha = rp.env;
+    ctx.strokeStyle = rimColor;
+    ctx.lineWidth = 2.5 * devicePixelRatio;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  } else {
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.shadowBlur = 0;
+
+  drawElectron(s, c0, R);
+  drawShooter(s, c0, R);
+  drawSparks(s);
+  drawFlare(s, c0, R);
+  requestAnimationFrame(draw);
+}
+
+// Comet orbiting just outside the rim, one lap every 24s: pulsing head, soft widening
+// tail that wobbles with layered-sine noise, and dust specks streaming off behind it
+const dust = Array.from({ length: 70 }, () => ({
+  t0: Math.random(),                 // starting position along the tail, 0 = head
+  off: Math.random() * 2 - 1,        // which side of the tail it drifts to
+  rate: 0.12 + Math.random() * 0.2,  // how fast it streams back, tail-lengths per second
+  ph: Math.random() * 6.3,           // flicker phase
+}));
+
+function drawElectron(s, c0, R) {
+  const dpr = devicePixelRatio;
+  const orbit = R + 6 * dpr;
+  const ang = s * Math.PI * 2 / 24 - Math.PI / 2; // start at the top, clockwise
+  const TRAIL = 1.1, N = 64;                       // tail length in radians, stamp count
+  // radial wobble at position t along the tail (0 = head); grows towards the tail end
+  const wobble = t => {
+    const i = t * N;
+    return (Math.sin(i * 0.45 + s * 1.7) + 0.6 * Math.sin(i * 1.3 - s * 2.3)
+      + 0.3 * Math.sin(i * 2.9 + s * 3.1)) * 6 * dpr * t;
+  };
+  const at = (t, extra = 0) => {
+    const a = ang - TRAIL * t, r = orbit + wobble(t) + extra;
+    return [c0 + Math.cos(a) * r, c0 + Math.sin(a) * r];
+  };
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+
+  // Tail: soft glow stamps, widening and fading away from the head (back to front so the head sits on top)
+  for (let i = N; i >= 1; i--) {
+    const t = i / N, k = 1 - t;
+    const [x, y] = at(t);
+    const gr = (4 + 14 * t) * dpr;
+    ctx.globalAlpha = 0.35 * k * k;
+    ctx.drawImage(glow, x - gr, y - gr, gr * 2, gr * 2);
+  }
+
+  // Dust specks streaming back from the head, spreading out and flickering
+  ctx.fillStyle = '#dbe8ff';
+  for (const d of dust) {
+    const t = (d.t0 + s * d.rate) % 1;
+    const [x, y] = at(t * 1.15, d.off * (2 + 14 * t) * dpr);
+    ctx.globalAlpha = (1 - t) ** 1.5 * (0.5 + 0.5 * Math.sin(s * 6 + d.ph));
+    ctx.beginPath();
+    ctx.arc(x, y, (0.6 + 0.8 * (1 - t)) * dpr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Head: pulsing coma + bright nucleus
+  const [x, y] = at(0);
+  const pulse = 0.5 + 0.5 * Math.sin(s * Math.PI * 2 / 3); // slow 3s pulse, 0..1
+  const gr = (14 + 16 * pulse) * dpr;
+  ctx.globalAlpha = 0.7 + 0.3 * pulse;
+  ctx.drawImage(glow, x - gr, y - gr, gr * 2, gr * 2);
+  ctx.drawImage(glow, x - gr / 3, y - gr / 3, gr / 1.5, gr / 1.5); // hot inner core
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.arc(x, y, (2.2 + 1 * pulse) * dpr, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Occasional shooting star: streaks in from outside, hits the rim, and sends out
+// a ripple (rings spreading from the impact + two bright pulses running along the rim)
+let shot = null, nextShot = 4;  // first one ~4s in, then every 6-14s
+const FLY = 0.7, RIPPLE = 2.6;  // seconds
+
+function drawShooter(s, c0, R) {
+  const dpr = devicePixelRatio;
+  if (!shot && s >= nextShot) {
+    const th = Math.random() * Math.PI * 2;           // impact angle on the rim
+    const tilt = (Math.random() < 0.5 ? -1 : 1) * (0.35 + Math.random() * 0.5); // come in at a slant
+    const px = c0 + Math.cos(th) * R, py = c0 + Math.sin(th) * R;
+    const L = u * 0.22;
+    shot = { t0: s, th, px, py,
+      sx: px + Math.cos(th + tilt) * L, sy: py + Math.sin(th + tilt) * L };
+  }
+  if (!shot) return;
+  const age = s - shot.t0;
+  if (age > FLY + RIPPLE) { shot = null; nextShot = s + 6 + Math.random() * 8; return; }
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+
+  if (age < FLY) {
+    // Streak: head eases in towards the rim, tail drawn back along its path
+    const k = (age / FLY) ** 1.6;
+    const hx = shot.sx + (shot.px - shot.sx) * k, hy = shot.sy + (shot.py - shot.sy) * k;
+    const back = Math.min(k, 0.45);
+    const tx = hx - (shot.px - shot.sx) * back, ty = hy - (shot.py - shot.sy) * back;
+    const g = ctx.createLinearGradient(hx, hy, tx, ty);
+    g.addColorStop(0, 'rgba(240,248,255,0.95)');
+    g.addColorStop(1, 'rgba(120,160,255,0)');
+    ctx.strokeStyle = g;
+    ctx.lineWidth = 2 * dpr;
+    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(hx, hy); ctx.stroke();
+    const gr = 10 * dpr;
+    ctx.drawImage(glow, hx - gr, hy - gr, gr * 2, gr * 2);
+  } else {
+    if (!shot.hit) { shot.hit = true; spawnSparks(shot, s); }
+    const p = (age - FLY) / RIPPLE;                    // 0 at impact -> 1 when gone
+    // Impact flash
+    const fr = (20 + 40 * p) * dpr;
+    ctx.globalAlpha = (1 - p) ** 3;
+    ctx.drawImage(glow, shot.px - fr, shot.py - fr, fr * 2, fr * 2);
+  }
+  ctx.restore();
+}
+
+// Debris thrown off by an impact. Motion is closed-form (velocity decays as e^-DRAG*t),
+// so no per-frame state: position = start + v * (1 - e^-DRAG*t) / DRAG
+let sparks = [];
+const DRAG = 2.2;
+
+function spawnSparks(sh, s) {
+  const n = sh.th;                                                  // outward normal at impact
+  // incoming direction reflected off the rim's tangent, so some debris "bounces" onward
+  const ix = sh.px - sh.sx, iy = sh.py - sh.sy;
+  const nx = Math.cos(n), ny = Math.sin(n), dot = ix * nx + iy * ny;
+  const refl = Math.atan2(iy - 2 * dot * ny, ix - 2 * dot * nx);
+  sparks = sparks.filter(p => s - p.t0 < p.life); // drop finished ones
+  for (let i = 0; i < 45; i++) {
+    const bounce = Math.random() < 0.4;
+    const a = bounce ? refl + (Math.random() - 0.5) * 0.8 : n + (Math.random() - 0.5) * 2.2;
+    const sp = u * (0.1 + Math.random() * 0.45);  // initial speed, px/s
+    sparks.push({
+      t0: s, x: sh.px, y: sh.py,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: 0.8 + Math.random() * 1.2,
+      col: Math.random() < 0.6 ? '255,225,180' : '170,200,255', // hot amber-white or cool blue
+      w: 0.8 + Math.random() * 1.2,
+    });
+  }
+}
+
+function drawSparks(s) {
+  if (!sparks.length) return;
+  const dpr = devicePixelRatio;
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.lineCap = 'round';
+  for (const p of sparks) {
+    const t = s - p.t0;
+    if (t > p.life) continue;
+    const decay = Math.exp(-DRAG * t), travel = (1 - decay) / DRAG;
+    const x = p.x + p.vx * travel, y = p.y + p.vy * travel;
+    // streak points back along current velocity; shrinks as the spark slows
+    const tx = x - p.vx * decay * 0.06, ty = y - p.vy * decay * 0.06;
+    const k = 1 - t / p.life;
+    ctx.globalAlpha = k * k;
+    ctx.strokeStyle = `rgb(${p.col})`;
+    ctx.lineWidth = p.w * dpr;
+    ctx.beginPath(); ctx.moveTo(tx, ty); ctx.lineTo(x, y); ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// Rim wave after an impact: a decaying sine that travels both ways round the rim from
+// the hit point, shrinking with time (env) and with distance from the impact
+function rimRipple(s) {
+  if (!shot) return null;
+  const t = s - shot.t0 - FLY;
+  if (t < 0 || t > RIPPLE) return null;
+  const A = 9 * devicePixelRatio, K = 16, W = 10, SIGMA = 1; // amplitude, wave number, rad/s, distance decay
+  const env = Math.exp(-t / 0.9);
+  const th = shot.th;
+  return {
+    env,
+    off: a => {
+      const d = Math.abs(Math.atan2(Math.sin(a - th), Math.cos(a - th))); // angular distance from impact
+      const phase = K * d - W * t;
+      if (phase > 0) return 0; // wave front hasn't reached here yet
+      return A * env * Math.exp(-d / SIGMA) * Math.sin(phase); // first swing is inward, like a dent
+    },
+  };
+}
+
+// Adds the rim outline to the current path: a plain circle, or the rippled one
+function rimPath(c0, r, rp) {
+  if (!rp) { ctx.arc(c0, c0, r, 0, Math.PI * 2); return; }
+  const M = 240;
+  for (let i = 0; i <= M; i++) {
+    const a = i / M * Math.PI * 2, rr = r + rp.off(a);
+    const x = c0 + Math.cos(a) * rr, y = c0 + Math.sin(a) * rr;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.closePath();
+}
+
+// 80s anamorphic "headlights" flare, fading in only while the stars are at their widest.
+// Stars peak ~0.6 rad after the rim (their average lag), so the flare is timed to that.
+function drawFlare(s, c0, R) {
+  const phase = s * Math.PI / 4 - 0.6;
+  const ef = 0.5 + 0.5 * Math.cos(phase);
+  const f = Math.max(0, (ef - 0.8) / 0.2) ** 2; // 0 most of the cycle, 1 at the peak
+  if (f === 0) return;
+
+  // New light-source position each cycle, somewhere inside the circle
+  const cycle = Math.round(phase / (Math.PI * 2));
+  const h = Math.abs(Math.sin(cycle * 12.9898) * 43758.5453) % 1;
+  const ang = h * Math.PI * 2;
+  const sx = c0 + Math.cos(ang) * R * 0.55, sy = c0 + Math.sin(ang) * R * 0.55;
+
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  ctx.globalAlpha = f;
+
+  // Long horizontal blue streak across the whole frame, plus a thinner hot core
+  for (const [thick, a0, a1] of [[0.012, 0.55, 0.35], [0.004, 0.9, 0.5]]) {
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.scale(1, thick);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, size * 0.75);
+    g.addColorStop(0, `rgba(235,245,255,${a0})`);
+    g.addColorStop(0.1, `rgba(90,150,255,${a1})`);
+    g.addColorStop(1, 'rgba(40,80,255,0)');
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(0, 0, size * 0.75, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+
+  // Bright source bloom
+  const b = ctx.createRadialGradient(sx, sy, 0, sx, sy, u * 0.12);
+  b.addColorStop(0, 'rgba(255,255,255,0.95)');
+  b.addColorStop(0.2, 'rgba(170,200,255,0.5)');
+  b.addColorStop(1, 'rgba(80,110,255,0)');
+  ctx.fillStyle = b;
+  ctx.fillRect(sx - u * 0.12, sy - u * 0.12, u * 0.24, u * 0.24);
+
+  // Thin rainbow ring around the source
+  const rr = u * 0.16;
+  const ring = ctx.createRadialGradient(sx, sy, rr * 0.9, sx, sy, rr);
+  ring.addColorStop(0, 'rgba(255,80,200,0)');
+  ring.addColorStop(0.3, 'rgba(255,80,200,0.12)');
+  ring.addColorStop(0.6, 'rgba(80,220,255,0.12)');
+  ring.addColorStop(1, 'rgba(80,220,255,0)');
+  ctx.fillStyle = ring;
+  ctx.fillRect(sx - rr, sy - rr, rr * 2, rr * 2);
+
+  // Hexagonal aperture ghosts strung along the line from the source through the centre
+  const dx = sx - c0, dy = sy - c0;
+  for (const [k, gr, col] of [
+    [0.45, 0.025, '120,255,200'],
+    [-0.25, 0.05, '255,120,220'],
+    [-0.6, 0.035, '120,180,255'],
+    [-0.95, 0.08, '255,190,90'],
+    [-1.35, 0.045, '160,120,255'],
+  ]) {
+    const gx = c0 + dx * k, gy = c0 + dy * k, r = u * gr;
+    const gg = ctx.createRadialGradient(gx, gy, 0, gx, gy, r);
+    gg.addColorStop(0, `rgba(${col},0.04)`);
+    gg.addColorStop(0.85, `rgba(${col},0.16)`);
+    gg.addColorStop(1, `rgba(${col},0.05)`);
+    ctx.fillStyle = gg;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = i * Math.PI / 3 + Math.PI / 6;
+      ctx.lineTo(gx + r * Math.cos(a), gy + r * Math.sin(a));
+    }
+    ctx.closePath();
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+addEventListener('resize', () => { resize(); });
+resize();
+requestAnimationFrame(draw);
+</script>
+</body>
+</html>
