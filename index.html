@@ -13,12 +13,29 @@
     width: min(129vmin, 1036px);
     aspect-ratio: 1;
   }
+  #effect {
+    position: fixed; top: 12px; left: 12px;
+    color-scheme: dark; /* dark native dropdown list */
+    background: rgba(12, 14, 28, .6); color: #8d98c4;
+    border: 1px solid rgba(120, 140, 220, .2); border-radius: 6px;
+    padding: 4px 8px; font: 13px system-ui, sans-serif;
+    opacity: .55; transition: opacity .2s;
+  }
+  #effect:hover, #effect:focus-visible { opacity: 1; }
+  #effect:focus-visible { outline: 1px solid rgba(150, 175, 255, .6); outline-offset: 2px; }
 </style>
 </head>
 <body>
+<select id="effect" aria-label="Centre effect">
+  <option value="stars">Stars</option>
+  <option value="plasma">Plasma</option>
+  <option value="aurora">Aurora</option>
+</select>
 <canvas id="c" role="img" aria-label="A circle filled with twinkling stars"></canvas>
 <script>
 const canvas = document.getElementById('c');
+const effect = document.getElementById('effect');
+
 const ctx = canvas.getContext('2d');
 let size, u, stars; // u = layout unit; canvas is 1.4u wide to leave room for the outer glow
 
@@ -81,18 +98,62 @@ function resize() {
   }));
 }
 
-function draw(t) {
-  const s = t / 1000;
-  // Rim glow breathes on the same 8s cycle as the stars (stars lag slightly behind it)
-  const e = 0.5 + 0.5 * Math.cos(s * Math.PI / 4); // 1 = stars out, glow strongest
-  const R = u * 0.43;
-  const rp = rimRipple(s); // rim wave from a shooting-star impact, or null
-  const c0 = size / 2;
-  ctx.clearRect(0, 0, size, size);
-  ctx.save();
-  ctx.beginPath();
-  rimPath(c0, R, rp);
-  ctx.clip();
+// Centre effect: plasma. Classic sum-of-sines field rendered at low resolution and scaled up
+// (the upscale blur keeps it soft), coloured through a palette lookup (lut) so variants can share it.
+const PLASMA_N = 120;
+const plasmaBuf = document.createElement('canvas');
+plasmaBuf.width = plasmaBuf.height = PLASMA_N;
+const plasmaCtx = plasmaBuf.getContext('2d');
+const plasmaImg = plasmaCtx.createImageData(PLASMA_N, PLASMA_N);
+// 256-entry colour lookup built from looping palette stops (first stop = last stop)
+function makeLUT(stops) {
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const x = i / 256 * (stops.length - 1), k = x | 0, f = x - k;
+    for (let c = 0; c < 3; c++) lut[i * 3 + c] = stops[k][c] + (stops[k + 1][c] - stops[k][c]) * f;
+  }
+  return lut;
+}
+// near-black -> dark purple -> violet -> navy -> bright blue -> deep violet
+const PLASMA_LUT = makeLUT([[5, 3, 12], [28, 18, 64], [100, 45, 170], [26, 42, 94], [60, 95, 230], [45, 25, 110], [5, 3, 12]]);
+// aurora borealis: near-black -> dark teal -> green -> deep blue -> bright green -> blue
+const AURORA_LUT = makeLUT([[2, 8, 12], [5, 40, 45], [20, 160, 110], [10, 60, 90], [40, 220, 140], [30, 90, 200], [2, 8, 12]]);
+
+function drawPlasma(s, c0, R, e, lut) {
+  const N = PLASMA_N, d = plasmaImg.data;
+  const gain = 0.7 + 0.5 * e; // breathes with the rim glow: dimmer when it's low, brighter at its peak
+  const cx = 0.5 * Math.sin(s * 0.21), cy = 0.5 * Math.cos(s * 0.17); // wandering centre of the ripple term
+  for (let j = 0; j < N; j++) {
+    const y = j / N * 2 - 1;
+    for (let i = 0; i < N; i++) {
+      const x = i / N * 2 - 1;
+      const v = Math.sin(x * 3.1 + s * 0.6)
+        + Math.sin(y * 2.7 - s * 0.45)
+        + Math.sin((x + y) * 2.2 + s * 0.35)
+        + Math.sin(Math.hypot(x - cx, y - cy) * 4.5 - s * 0.8);
+      // v is -4..4 -> palette position, slowly cycling through the palette
+      const idx = (((v * 0.125 + 0.5 + s * 0.03) % 1 + 1) % 1) * 255 | 0;
+      const o = (j * N + i) * 4;
+      d[o] = lut[idx * 3] * gain; d[o + 1] = lut[idx * 3 + 1] * gain; d[o + 2] = lut[idx * 3 + 2] * gain; d[o + 3] = 255;
+    }
+  }
+  plasmaCtx.putImageData(plasmaImg, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  // 5% oversize so an outward rim wave never reveals the plasma's square edge
+  ctx.drawImage(plasmaBuf, c0 - R * 1.05, c0 - R * 1.05, R * 2.1, R * 2.1);
+  // darken towards the rim, like the stars background does; edge opens up as the glow peaks
+  // edge colour = the palette's first (darkest) stop, so each variant gets a matching edge
+  const edge = `${lut[0]},${lut[1]},${lut[2]}`;
+  const v = ctx.createRadialGradient(c0, c0, R * (0.45 + 0.2 * e), c0, c0, R);
+  v.addColorStop(0, `rgba(${edge},0)`);
+  v.addColorStop(1, `rgba(${edge},${0.95 - 0.3 * e})`);
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, size, size);
+}
+
+// Centre effect: blue/purple gradient with drifting nebula clouds, plus drifting, linked, twinkling stars
+function drawStars(s, c0, R) {
   const g = ctx.createRadialGradient(c0, c0, 0, c0, c0, R);
   g.addColorStop(0, '#1a2a5e');    // blue centre
   g.addColorStop(0.55, '#1c1240'); // dark purple
@@ -170,6 +231,22 @@ function draw(t) {
   }
   ctx.globalCompositeOperation = 'source-over';
   ctx.globalAlpha = 1;
+}
+
+function draw(t) {
+  const s = t / 1000;
+  // Rim glow breathes on the same 8s cycle as the stars (stars lag slightly behind it)
+  const e = 0.5 + 0.5 * Math.cos(s * Math.PI / 4); // 1 = stars out, glow strongest
+  const R = u * 0.43;
+  const rp = rimRipple(s); // rim wave from a shooting-star impact, or null
+  const c0 = size / 2;
+  ctx.clearRect(0, 0, size, size);
+  ctx.save();
+  ctx.beginPath();
+  rimPath(c0, R, rp);
+  ctx.clip();
+  const fx = EFFECTS[effect.value];
+  fx.draw(s, c0, R, e);
   ctx.restore(); // drop the circle clip
 
   // Glowing rim: glow swells and brightens with the breath; the rim line itself
@@ -226,7 +303,8 @@ function draw(t) {
   drawElectron(s, c0, R);
   drawShooter(s, c0, R);
   drawSparks(s);
-  drawFlare(s, c0, R);
+  const fl = fx.flare(s, c0, R);
+  if (fl) drawFlare(fl, c0);
   requestAnimationFrame(draw);
 }
 
@@ -421,20 +499,31 @@ function rimPath(c0, r, rp) {
   ctx.closePath();
 }
 
-// 80s anamorphic "headlights" flare, fading in only while the stars are at their widest.
-// Stars peak ~0.6 rad after the rim (their average lag), so the flare is timed to that.
-function drawFlare(s, c0, R) {
+// Flare triggers. Each returns { f: strength 0..1, sx, sy: light-source position } or null.
+
+// Stars: fade in while the stars are at their widest. They peak ~0.6 rad after the rim
+// (their average lag); the light source moves to a new spot inside the circle each cycle.
+function breathFlare(s, c0, R) {
   const phase = s * Math.PI / 4 - 0.6;
   const ef = 0.5 + 0.5 * Math.cos(phase);
   const f = Math.max(0, (ef - 0.8) / 0.2) ** 2; // 0 most of the cycle, 1 at the peak
-  if (f === 0) return;
-
-  // New light-source position each cycle, somewhere inside the circle
+  if (f === 0) return null;
   const cycle = Math.round(phase / (Math.PI * 2));
   const h = Math.abs(Math.sin(cycle * 12.9898) * 43758.5453) % 1;
   const ang = h * Math.PI * 2;
-  const sx = c0 + Math.cos(ang) * R * 0.55, sy = c0 + Math.sin(ang) * R * 0.55;
+  return { f, sx: c0 + Math.cos(ang) * R * 0.55, sy: c0 + Math.sin(ang) * R * 0.55 };
+}
 
+// Plasma: fired by a shooting-star impact, from the impact point; quick flash, ~2s fade
+function impactFlare(s) {
+  if (!shot) return null;
+  const t = s - shot.t0 - FLY;
+  if (t < 0 || t > RIPPLE) return null;
+  return { f: t < 0.15 ? t / 0.15 : Math.exp(-(t - 0.15) / 0.7), sx: shot.px, sy: shot.py };
+}
+
+// 80s anamorphic "headlights" flare
+function drawFlare({ f, sx, sy }, c0) {
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
   ctx.globalAlpha = f;
@@ -496,6 +585,28 @@ function drawFlare(s, c0, R) {
   }
   ctx.restore();
 }
+
+// Centre effects. To add one: write its draw function, register it here, and add an
+// <option> with the same key. draw(s, c0, R, e) paints inside the circle clip
+// (e = rim-glow breath, 0..1);
+// flare(s, c0, R) decides when the 80s flare fires ({ f, sx, sy } or null).
+const EFFECTS = {
+  stars: { draw: drawStars, flare: breathFlare, label: 'A circle filled with twinkling stars' },
+  plasma: { draw: (s, c0, R, e) => drawPlasma(s, c0, R, e, PLASMA_LUT), flare: impactFlare, label: 'A circle filled with swirling plasma' },
+  aurora: { draw: (s, c0, R, e) => drawPlasma(s, c0, R, e, AURORA_LUT), flare: impactFlare, label: 'A circle filled with swirling green and blue aurora' },
+};
+
+// Remember the chosen effect between visits (storage can be blocked, e.g. private modes)
+const STORE_KEY = 'vestibule.effect';
+try {
+  const saved = localStorage.getItem(STORE_KEY);
+  if (Object.hasOwn(EFFECTS, saved)) effect.value = saved;
+} catch {}
+canvas.ariaLabel = EFFECTS[effect.value].label;
+effect.addEventListener('change', () => {
+  canvas.ariaLabel = EFFECTS[effect.value].label;
+  try { localStorage.setItem(STORE_KEY, effect.value); } catch {}
+});
 
 addEventListener('resize', () => { resize(); });
 resize();
